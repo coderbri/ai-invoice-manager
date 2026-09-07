@@ -1,5 +1,20 @@
 # Invoicer — Changelog
 
+## v0.2.0 — Core Utilities & Server Boot (Express, middleware, error handling)
+**Release Date:** September 7, 2026
+
+- Added `utils/ApiError.js` — custom error class carrying an HTTP status code, message, and optional details, with static factory methods (`badRequest`, `unauthorized`, `forbidden`, `notFound`, `conflict`, `tooMany`, `internal`) for consistent error creation across every route
+- Added `utils/asyncHandler.js` — wraps async route handlers so rejected promises forward to Express's error middleware automatically, instead of needing try/catch in every route
+- Added `utils/jwt.js` — signs and verifies JWTs using the secret/expiry from env config, plus shared `cookieOptions` (HTTP-only, secure in production, 7-day expiry) for storing the auth token client-side without exposing it to JavaScript
+- Added `middleware/errorHandler.js` — centralized error handler that all errors funnel through; translates raw Postgres error codes (unique violation, foreign key violation, invalid input) and Zod validation errors into clean, consistent JSON responses, logs 5xx errors server-side, and includes stack traces only outside production
+- Added `middleware/validate.js` — generic middleware factory that validates `req.body` (or another source) against a Zod schema, replacing raw input with the parsed/cleaned data on success or throwing a structured 400 on failure
+- Added `middleware/rateLimit.js` — two rate limiters: one capping AI (Gemini) requests per user to control cost/abuse, one capping auth attempts per IP to slow down brute-force login attempts
+- Added `routes/health.js` — `/api/health` endpoint that pings the database and reports status, uptime, and DB connectivity
+- Assembled `server.js` — Express app wired with CORS, JSON/urlencoded body parsing, cookie parsing, request logging (dev only), the health route, and the 404/error-handling middleware chain
+- Verified end-to-end: `npm run dev` boots the server, and `GET /api/health` returns a live status/uptime/DB-connected response
+
+---
+
 ## v0.1.0 — Backend Setup, Neon PostgreSQL & Database Schema
 **Release Date:** September 5, 2026
 
