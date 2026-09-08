@@ -1,5 +1,24 @@
 # Invoicer — Changelog
 
+## v0.3.0 — Authentication APIs (Register, Login, Get Me) + cookie/JWT middleware
+**Release Date:** September 8, 2026
+
+- Added `models/User.js` — user persistence layer: create, lookup by email/id (with and without password hash), name/password updates, and bcrypt hash/compare helpers; a `PUBLIC_COLS` constant keeps `password_hash` out of any response sent to the client
+- Added `models/Settings.js` — company settings persistence: `ensure()` upserts a default settings row for a user, `update()` patches an allow-listed set of fields, and `nextInvoiceNumber()` atomically increments and returns a sequential, prefixed invoice number inside a transaction
+- Added `middleware/auth.js` (`requireAuth`) — verifies the JWT from the session cookie, loads the corresponding user, and attaches it to `req.user`; rejects with 401 on a missing, invalid, or expired token, or a user that no longer exists
+- Added `routes/auth.js` with the following endpoints:
+  - `POST /register` — validates input, rejects duplicate emails, hashes the password, creates the user, initializes their company settings, and issues a session cookie
+  - `POST /login` — verifies email/password against the stored hash and issues a session cookie
+  - `POST /logout` — clears the session cookie
+  - `GET /me` — returns the authenticated user from `req.user` (requires auth)
+  - `PATCH /profile` — updates the authenticated user's name (requires auth)
+  - `PATCH /password` — verifies the current password before updating to a new one (requires auth)
+- Applied `authLimiter` to `/register`, `/login`, and `/password` to slow down brute-force attempts
+- Wired `routes/auth.js` into `server.js` at `/api/auth`
+- Manually verified the full auth flow in Postman: registered two users (`Alex Chen` / Chen Studio, `John Smith` / Smithy Studios), confirmed `/login` returns the expected user object, and confirmed the session cookie (persisted by Postman) authorizes a subsequent `GET /me` request returning the same authenticated user
+
+---
+
 ## v0.2.0 — Core Utilities & Server Boot (Express, middleware, error handling)
 **Release Date:** September 7, 2026
 

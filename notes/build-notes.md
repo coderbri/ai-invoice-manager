@@ -5,6 +5,7 @@
 - [Stage 1: Backend Scaffold & Environment Setup](#stage-1-backend-scaffold--environment-setup)
 - [Stage 2: Database Layer (Neon Postgres, Schema, Connection Pool)](#stage-2-database-layer-neon-postgres-schema-connection-pool)
 - [Stage 3: Core Utilities & Error Handling](#stage-3-core-utilities--error-handling)
+- [Stage 4: Authentication (Register, Login, Sessions, Password Change)](#stage-4-authentication-register-login-sessions-password-change)
 
 
 ## Stage 1: Backend Scaffold & Environment Setup
@@ -67,3 +68,26 @@ Why so much error-handling infrastructure this early, before a single "real" fea
 - **`validate` middleware turns "trust but verify" into "verify, then trust."** By reassigning `req[source] = result.data` after a successful Zod parse, every downstream handler works with data that's *already* been type-checked and shaped — no defensive checks needed inside the route logic itself.
 - **Rate limiting has two distinct purposes here, not one.** The AI limiter is about *cost control* — Gemini calls aren't free, so an unbounded loop (buggy frontend code, or a malicious user) could run up a real bill. The auth limiter is about *security* — slowing down brute-force password guessing. Same tool (`express-rate-limit`), two different threat models, which is why they have different windows/limits and key strategies (per-user vs. per-IP).
 - **The health check earns its place by testing the thing that actually breaks in production: the DB connection**, not just "is the process alive." A server that's running but can't reach Postgres is still down in every way that matters to users.
+
+---
+
+## Stage 4: Authentication (Register, Login, Sessions, Password Change)
+
+**Manual Verification (Postman)**
+- Registered two test users via `POST /register` to confirm duplicate-email checking and independent sessions:
+```json
+  { "name": "Alex Chen", "email": "alex@timetoprogram.com", "password": "Test@1234", "companyName": "Chen Studio" }
+  { "name": "John Smith", "email": "jsmith@timetoprogram.com", "password": "Test@1234", "companyName": "Smithy Studios" }
+```
+- Confirmed `/login` returns the authenticated user (password hash correctly excluded from the response, matching `PUBLIC_COLS`)
+- Confirmed the session cookie set on login/register is picked up automatically by Postman's cookie jar, and `GET /me` (a `requireAuth`-protected route) returns the same user without re-sending credentials — proof the cookie → JWT → `req.user` chain works end-to-end
+
+**Takeaways**
+
+- **Never return the password hash, even by accident.** `models/User.js` uses a `PUBLIC_COLS` constant for every query whose result might reach a response — `findByEmail`/`findByIdWithHash` are the *only* two functions that `SELECT *`, and both are used strictly for internal password comparison, never sent back to the client. Having one named constant instead of retyping the column list everywhere means there's exactly one place to get it right.
+- **`issueSession()` centralizes what "being logged in" means.** Both `/register` and `/login` end by calling the same helper (sign a JWT with `sub: user.id`, set it as an HTTP-only cookie). If the session strategy ever changes — different expiry, refresh tokens, whatever — there's one function to update instead of two near-duplicate code paths drifting apart over time.
+- **`ensure()` is an idempotent upsert, not a "create."** `ON CONFLICT (user_id) DO NOTHING` means calling `Settings.ensure()` on a user who already has settings is a safe no-op, not an error. This matters because `nextInvoiceNumber()` also calls it defensively — a user could theoretically hit invoicing before their settings row exists for some edge-case reason, and this guarantees a row is always there before it's read/updated.
+- **Sequential invoice numbers need a transaction, not just a normal update.** If two requests tried to grab the "next" invoice number for the same user at nearly the same time without a transaction, they could both read `next_seq = 5` and both produce `INV-0005` — a collision. Wrapping the read-and-increment in `withTransaction` (from Stage 2) makes the whole operation atomic, so concurrent requests get serialized instead of racing.
+- **`requireAuth` is where "cookie" becomes "user."** Every protected route just calls this once as middleware rather than re-verifying a JWT inline — it decodes the cookie, confirms the user it points to still exists (handles the case where a user was deleted but their old token is still floating around in a browser), and attaches `req.user` so downstream handlers never touch tokens directly.
+- **Validation middleware doesn't just reject bad input — it silently reshapes it.** By default, Zod's `.object()` schemas strip any key not explicitly declared. That's usually a feature (it sanitizes unexpected fields off the request body automatically), but it's a sharp edge: if a schema is missing a field the handler actually needs, that field vanishes with no error, and the failure shows up later as a confusing logic bug rather than an obvious validation error. Worth double-checking that every field a handler reads from `req.body` is also declared in that route's schema.
+- **Rate limiting `/password` alongside `/login` and `/register` matters** because a password-change endpoint that verifies a "current password" is itself a guessable-secret endpoint — without a limiter, it's just as brute-forceable as the login route.

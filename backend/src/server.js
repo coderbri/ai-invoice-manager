@@ -1,6 +1,6 @@
 /**
- * @file: server.js
- * @description Configures and starts the Express API server with middleware, routes, and error handling.
+ * @file: src/server.js
+ * @description Configures and starts the Express API with authentication, health, middleware, and error handling.
  */
 
 const express = require("express");
@@ -13,6 +13,7 @@ const { connectDB } = require("./config/db");
 const { notFound, errorHandler } = require("./middleware/errorHandler");
 
 const healthRouter = require("./routes/health");
+const authRouter = require("./routes/auth");
 
 const app = express();
 
@@ -29,6 +30,7 @@ app.use(cookieParser());
 if (!env.isProd) app.use(morgan("dev")); // Enable request logging in development.
 
 app.use("/api/health", healthRouter);
+app.use("/api/auth", authRouter);
 
 app.use(notFound);
 app.use(errorHandler);
