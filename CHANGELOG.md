@@ -1,5 +1,20 @@
 # Invoicer — Changelog
 
+## v0.4.0 — Clients CRUD APIs
+**Release Date:** September 9, 2026
+
+- Added `routes/client.js`, mounted at `/api/clients` (all routes protected by `requireAuth`):
+  - `GET /` — lists all clients for the authenticated user, with a billing rollup per client (invoice count, total billed, outstanding balance) computed via a single grouped query with a left join on invoices
+  - `GET /:id` — returns a single client, their full invoice history, and computed stats (total billed, outstanding, invoice count)
+  - `POST /` — validates and creates a new client
+  - `PATCH /:id` — partial update; only rebuilds `SET` clauses for fields actually present in the request body, leaving the rest untouched
+  - `DELETE /:id` — deletes a client scoped to the authenticated user
+- Every route scopes its query by `user_id`, so one user can never read, edit, or delete another user's clients
+- Wired `routes/client.js` into `server.js` at `/api/clients`
+- Verified end-to-end in Postman: created a client (`Nova Retail Group`), confirmed it appears via the list endpoint with correctly zeroed rollup stats, and confirmed the single-client endpoint returns the client with an empty invoice history
+
+---
+
 ## v0.3.0 — Authentication APIs (Register, Login, Get Me) + cookie/JWT middleware
 **Release Date:** September 8, 2026
 

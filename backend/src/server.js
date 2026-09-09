@@ -14,6 +14,7 @@ const { notFound, errorHandler } = require("./middleware/errorHandler");
 
 const healthRouter = require("./routes/health");
 const authRouter = require("./routes/auth");
+const clientRouter = require("./routes/client");
 
 const app = express();
 
@@ -31,6 +32,7 @@ if (!env.isProd) app.use(morgan("dev")); // Enable request logging in developmen
 
 app.use("/api/health", healthRouter);
 app.use("/api/auth", authRouter);
+app.use("/api/clients", clientRouter);
 
 app.use(notFound);
 app.use(errorHandler);

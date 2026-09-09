@@ -6,6 +6,7 @@
 - [Stage 2: Database Layer (Neon Postgres, Schema, Connection Pool)](#stage-2-database-layer-neon-postgres-schema-connection-pool)
 - [Stage 3: Core Utilities & Error Handling](#stage-3-core-utilities--error-handling)
 - [Stage 4: Authentication (Register, Login, Sessions, Password Change)](#stage-4-authentication-register-login-sessions-password-change)
+- [Stage 5: Clients CRUD API](#stage-5-clients-crud-api)
 
 
 ## Stage 1: Backend Scaffold & Environment Setup
@@ -91,3 +92,23 @@ Why so much error-handling infrastructure this early, before a single "real" fea
 - **`requireAuth` is where "cookie" becomes "user."** Every protected route just calls this once as middleware rather than re-verifying a JWT inline — it decodes the cookie, confirms the user it points to still exists (handles the case where a user was deleted but their old token is still floating around in a browser), and attaches `req.user` so downstream handlers never touch tokens directly.
 - **Validation middleware doesn't just reject bad input — it silently reshapes it.** By default, Zod's `.object()` schemas strip any key not explicitly declared. That's usually a feature (it sanitizes unexpected fields off the request body automatically), but it's a sharp edge: if a schema is missing a field the handler actually needs, that field vanishes with no error, and the failure shows up later as a confusing logic bug rather than an obvious validation error. Worth double-checking that every field a handler reads from `req.body` is also declared in that route's schema.
 - **Rate limiting `/password` alongside `/login` and `/register` matters** because a password-change endpoint that verifies a "current password" is itself a guessable-secret endpoint — without a limiter, it's just as brute-forceable as the login route.
+
+---
+
+## Stage 5: Clients CRUD API
+
+**Manual Verification (Postman)**
+- Created a client while authenticated (session cookie carried automatically):
+```json
+  { "name": "Nova Retail Group", "email": "billing@novaretail.com", "company": "Nova Retail" }
+```
+  → `201 Created`, returns the full client record with a fresh UUID
+- Confirmed `GET /` lists the new client with rollup fields correctly zeroed (`invoice_count: 0`, `total_billed: 0`, `outstanding: 0`) since no invoices exist yet
+- Confirmed `GET /:id` (using the UUID from creation) returns the client, an empty `invoices` array, and matching zeroed `stats`
+- That client UUID will be needed next for creating an invoice against it
+
+**Takeaways**
+- **The rollup query is the pattern worth remembering:** a single `LEFT JOIN` + `GROUP BY` computes count/sum aggregates per client in one round trip, instead of running an N+1 query (one query per client to fetch their invoice stats). `COALESCE(SUM(...), 0)` matters here specifically because a client with zero invoices produces `NULL` from `SUM` over an empty group — without the `COALESCE`, `total_billed` would come back as `null` instead of `0`.
+- **`GET /:id` intentionally does two separate queries instead of one big join** — first confirm the client exists and belongs to this user (and 404 immediately if not), then fetch its invoices. Doing it in one step would make it harder to distinguish "client doesn't exist" from "client exists but has no invoices."
+- **The `user_id` scope on every query is the actual authorization boundary**, not `requireAuth` alone. `requireAuth` only proves *who* is asking; every query's `WHERE ... AND user_id = $2` is what stops that authenticated user from reaching another user's data by guessing a client UUID. Auth and ownership-scoping are two separate concerns, and both are needed together.
+- **The dynamic `PATCH` builder is the reusable shape for partial updates**: loop over an explicit allow-list of column names, only add a field to `SET` if it's actually present in the body, and bail out with a 400 if nothing was sent. Since it's driven by an allow-list rather than `Object.keys(req.body)`, there's no risk of an unexpected key (or something Zod didn't strip) reaching raw SQL.
