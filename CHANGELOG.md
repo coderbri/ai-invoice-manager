@@ -1,5 +1,26 @@
 # Invoicer — Changelog
 
+## v0.5.0 — Invoices APIs (line items, totals & status in a transaction)
+**Release Date:** September 10, 2026
+
+- Added `routes/invoices.js`, mounted at `/api/invoices` (all routes protected by `requireAuth`):
+  - `GET /` — lists invoices with filtering by client and status (including a derived "overdue" state for sent invoices past their due date), text search across invoice number/client name, and configurable sorting
+  - `GET /:id` — returns a single invoice with its client details and line items
+  - `POST /` — creates an invoice, computes its totals from raw line items, and persists the invoice and its items atomically within a transaction
+  - `PATCH /:id` — partial update; only recalculates totals when items, tax rate, or discount actually change, and only rebuilds the `SET` clause for fields present in the request
+  - `PATCH /:id/status` — dedicated status-transition endpoint that stamps `paid_at` when an invoice moves to "paid"
+  - `DELETE /:id` — deletes an invoice scoped to the authenticated user
+- Added `utils/invoice.js` — the money-math layer:
+  - `round2()` snaps values to two decimal places to avoid floating-point rounding errors in currency math
+  - `computeTotals()` normalizes raw line items, calculates each item's amount (`quantity × rate`), then derives subtotal, discount, tax amount, and total
+  - `effectiveStatus()` derives a display status, marking a "sent" invoice as "overdue" once its due date has passed
+  - `serializeInvoice()` converts Postgres's numeric-as-string values into real numbers before a response reaches the client
+- Renamed `routes/client.js` to `clients.js` for naming consistency across route files
+- Carried forward the same `user_id`-scoping ownership boundary established in the Clients CRUD API to every invoice query
+- Verified end-to-end in Postman: created an invoice for an existing client with a tax rate and multiple line items, and confirmed subtotal, tax amount, and total all compute correctly and persist atomically alongside their line items
+
+---
+
 ## v0.4.0 — Clients CRUD APIs
 **Release Date:** September 9, 2026
 
