@@ -1,5 +1,23 @@
 # Invoicer — Changelog
 
+## v0.6.0 — Dashboard & Reports APIs (SQL aggregations, aging report)
+**Release Date:** September 28, 2026
+
+- Added `routes/dashboard.js`, mounted at `/api/dashboard`:
+  - Single-pass aggregate query for total revenue, outstanding balance, revenue collected this month, overdue count/total, and total invoice count
+  - Six-month revenue series generated with `generate_series` + a left join, so months with zero activity still appear with `0` rather than being skipped
+  - Five most recent invoices, joined with client name/company, serialized via `serializeInvoice`
+  - Total client count
+- Added `routes/reports.js`, mounted at `/api/reports`:
+  - Revenue, expenses, and computed net profit, plus outstanding balance
+  - Six-month revenue-vs-expenses trend using the same month-generation pattern as the dashboard
+  - Accounts receivable aging report, bucketing unpaid invoices into current, 1–30, 31–60, 61–90, and 90+ days overdue
+  - Top five clients ranked by amount billed, with paid-vs-total for each
+  - Invoice status breakdown by total dollar value (draft, sent, overdue, paid)
+- Verified end-to-end in Postman against live data (2 invoices, 1 client, both unpaid and not yet due): `/api/dashboard` correctly reported outstanding balance, invoice/client counts, and the two recent invoices with a zeroed six-month series; `/api/reports` correctly bucketed the full outstanding balance as "Current" aging and attributed it to the right client and status
+
+---
+
 ## v0.5.0 — Invoices APIs (line items, totals & status in a transaction)
 **Release Date:** September 10, 2026
 

@@ -7,6 +7,8 @@
 - [Stage 3: Core Utilities & Error Handling](#stage-3-core-utilities--error-handling)
 - [Stage 4: Authentication (Register, Login, Sessions, Password Change)](#stage-4-authentication-register-login-sessions-password-change)
 - [Stage 5: Clients CRUD API](#stage-5-clients-crud-api)
+- [Stage 6: Invoices API (line items, totals & status in a transaction)](#stage-6-invoices-api-line-items-totals--status-in-a-transaction)
+- [Stage 7: Dashboard & Reports APIs (SQL aggregations, aging report)](#stage-7-dashboard--reports-apis-sql-aggregations-aging-report)
 
 
 ## Stage 1: Backend Scaffold & Environment Setup
@@ -144,3 +146,60 @@ Why so much error-handling infrastructure this early, before a single "real" fea
 - **`replaceItems()` uses delete-then-reinsert rather than diffing and updating individual items — a deliberate simplicity trade-off.** For a `PATCH` that includes a new `items` array, it's far simpler to wipe all existing line items for that invoice and reinsert the new set than to compute which items were added, removed, or edited. This only works safely because it's wrapped in `withTransaction()` — if the reinsert step failed partway through, the delete would roll back too, rather than leaving an invoice with no items at all.
 - **`PATCH /:id` only recomputes totals when it actually needs to** — either `items` changed, or `tax_rate`/`discount` changed. If someone's just updating `notes` or `terms`, there's no reason to touch the money math at all; the existing stored totals stay untouched. This mirrors the same "only rebuild what's present" allow-list pattern from the Clients `PATCH` route in Stage 5.
 - **`PATCH /:id/status` exists as its own endpoint rather than folding status changes into the general `PATCH`** because moving to "paid" has a side effect beyond just updating a column — it needs to stamp `paid_at`. Keeping that as a dedicated, narrower endpoint makes the "mark as paid" action in the UI a single, explicit intent rather than a general-purpose update that happens to also change status.
+
+---
+
+## Stage 7: Dashboard & Reports APIs (SQL aggregations, aging report)
+
+**Manual Verification (Postman)**
+
+- Tested `GET /api/dashboard` against live data (2 invoices, 1 client, both `sent` and not yet due):
+  ```json
+  {
+      "stats": {
+          "totalRevenue": 0,
+          "outstanding": 11891.6,
+          "paidThisMonth": 0,
+          "overdueCount": 0,
+          "overdueTotal": 0,
+          "invoiceCount": 2,
+          "clientCount": 1
+      },
+      "revenueSeries": [ /* 6 months, Apr–Sep, all zeroed */ ],
+      "recentInvoices": [ /* INV-0003 and INV-0002, both $5,945.80, Nova Retail Group */ ]
+  }
+  ```
+    → correctly reported the outstanding balance, invoice/client counts, and the two most recent invoices; `revenueSeries` came back zeroed across all six months since nothing has been marked "paid" yet
+
+- Tested `GET /api/reports` against the same data:
+  ```json
+  {
+      "totals": { "revenue": 0, "expenses": 0, "netProfit": 0, "outstanding": 11891.6 },
+      "monthly": [ /* 6 months, all zeroed */ ],
+      "aging": [
+          { "bucket": "Current", "value": 11891.6 },
+          { "bucket": "1–30d", "value": 0 },
+          { "bucket": "31–60d", "value": 0 },
+          { "bucket": "61–90d", "value": 0 },
+          { "bucket": "90d+", "value": 0 }
+      ],
+      "topClients": [ { "name": "Nova Retail Group", "billed": 11891.6, "paid": 0 } ],
+      "statusBreakdown": [
+          { "name": "Draft", "value": 0 },
+          { "name": "Sent", "value": 11891.6 },
+          { "name": "Overdue", "value": 0 },
+          { "name": "Paid", "value": 0 }
+      ]
+  }
+  ```
+    → correctly bucketed the full outstanding balance as "Current" aging (both invoices have no `due_date` set yet), attributed the full amount to Nova Retail Group as top client, and classified it under "Sent" in the status breakdown
+
+**Takeaways**
+
+- **A single aggregate query beats several round trips when every number comes from the same table.** Both the dashboard's `totals` query and the reports' `totals`/`aging`/`status` queries pack multiple `SUM(CASE WHEN ...)` expressions into one `SELECT` over `invoices`, computing five or six different figures (revenue, outstanding, overdue, this-month, etc.) in a single pass rather than one query per metric.
+- **`generate_series` + `LEFT JOIN` is the reusable pattern for "always show N periods, even empty ones."** Without generating the six month rows first via a CTE and left-joining invoices onto them, months with zero paid invoices would simply be missing from the result set instead of showing up as `0` — which would break a frontend chart expecting exactly six data points every time.
+- **`COUNT(*) FILTER (WHERE ...)` computes a conditional count in the same query as everything else,** instead of needing a second query just to count overdue invoices. It's the count-based sibling of the `SUM(CASE WHEN ...)` pattern used everywhere else in these two files.
+- **A plain `COUNT(*)` (no `FILTER`) sits fine alongside `SUM(CASE WHEN...)` in the same aggregate query, with no `GROUP BY` needed** — every aggregate in the `SELECT` list runs over the same full row set matched by `WHERE user_id = $1`, so `COUNT(*)` just counts all of them while each `SUM` conditionally totals a subset. It's easy to miss the comma between the last `SUM(...)` and a trailing `COUNT(*)` when adding one to an existing list of aggregates by hand.
+- **The aging report's bucketing logic depends entirely on `CURRENT_DATE - due_date` returning a plain integer day count** — Postgres date subtraction gives you an `integer` (days), which is what makes `BETWEEN 1 AND 30` etc. work directly without extra date-math functions.
+- **Dashboard and Reports intentionally overlap rather than share one endpoint.** Both compute revenue/outstanding, but dashboard is tuned for an at-a-glance snapshot (recent invoices, client count) while reports is tuned for analysis (trends, aging, top clients, status breakdown). Duplicating a couple of simple sums across two endpoints is a reasonable trade for keeping each endpoint's query focused on what its specific UI needs.
+- **Testing against real, non-trivial data (not just an empty database) is what actually validates aggregation logic.** The zeroed dashboard/reports responses from Stage 5 only proved the queries didn't crash; this session's test — with two real unpaid invoices — is what confirmed the `SUM`/`COALESCE`/bucketing logic produces the *correct* numbers, not just *some* numbers.
