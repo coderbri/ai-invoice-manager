@@ -1,5 +1,21 @@
 # Invoicer — Changelog
 
+## v0.7.0 — Settings & Services Catalog APIs
+**Release Date:** September 30, 2026
+
+- Added `routes/settings.js`, mounted at `/api/settings`:
+  - `GET /` — fetches the authenticated user's company settings, auto-creating a default row via `Settings.ensure()` if one doesn't exist yet
+  - `PATCH /` — updates only the company settings fields present in the request body (company name, logo, address, email, phone, currency, tax rate, invoice prefix, accent color)
+- Added `routes/items.js`, mounted at `/api/items`, for the reusable services/products catalog:
+  - `GET /` — lists all catalog items for the authenticated user, alphabetically by name
+  - `POST /` — validates and creates a new catalog item (name, description, rate, unit)
+  - `PATCH /:id` — partial update using the same "only rebuild SET clauses for fields actually sent" pattern established in the Clients and Invoices routes
+  - `DELETE /:id` — deletes a catalog item scoped to the authenticated user
+- Both routers protected end-to-end by `requireAuth` and scoped by `user_id` on every query
+- Verified end-to-end in Postman: `PATCH /api/settings` correctly updated company name, address, currency, tax rate, and invoice prefix in one call; `POST /api/items` correctly created a new catalog item ("Frontend development", $95/hour) with defaults applied for the omitted `description` field
+
+---
+
 ## v0.6.0 — Dashboard & Reports APIs (SQL aggregations, aging report)
 **Release Date:** September 28, 2026
 

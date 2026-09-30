@@ -9,6 +9,7 @@
 - [Stage 5: Clients CRUD API](#stage-5-clients-crud-api)
 - [Stage 6: Invoices API (line items, totals & status in a transaction)](#stage-6-invoices-api-line-items-totals--status-in-a-transaction)
 - [Stage 7: Dashboard & Reports APIs (SQL aggregations, aging report)](#stage-7-dashboard--reports-apis-sql-aggregations-aging-report)
+- [Stage 8: Settings & Services Catalog APIs](#stage-8-settings--services-catalog-apis)
 
 
 ## Stage 1: Backend Scaffold & Environment Setup
@@ -203,3 +204,72 @@ Why so much error-handling infrastructure this early, before a single "real" fea
 - **The aging report's bucketing logic depends entirely on `CURRENT_DATE - due_date` returning a plain integer day count** — Postgres date subtraction gives you an `integer` (days), which is what makes `BETWEEN 1 AND 30` etc. work directly without extra date-math functions.
 - **Dashboard and Reports intentionally overlap rather than share one endpoint.** Both compute revenue/outstanding, but dashboard is tuned for an at-a-glance snapshot (recent invoices, client count) while reports is tuned for analysis (trends, aging, top clients, status breakdown). Duplicating a couple of simple sums across two endpoints is a reasonable trade for keeping each endpoint's query focused on what its specific UI needs.
 - **Testing against real, non-trivial data (not just an empty database) is what actually validates aggregation logic.** The zeroed dashboard/reports responses from Stage 5 only proved the queries didn't crash; this session's test — with two real unpaid invoices — is what confirmed the `SUM`/`COALESCE`/bucketing logic produces the *correct* numbers, not just *some* numbers.
+
+---
+
+## Stage 8: Settings & Services Catalog APIs
+
+**Logic Flow**
+
+- **`routes/settings.js` is deliberately thin** because there's really only one row per user to manage — no list, no ID param, no ownership check needed beyond "which user is this." `GET /` calls `Settings.ensure()`, which (from Stage 4) upserts a default row if none exists yet, so the endpoint never 404s for a user who hasn't touched settings before. `PATCH /` hands the validated body straight to `Settings.update()`, which — also from Stage 4 — only rebuilds `SET` clauses for allow-listed fields actually present, so sending just `{ "tax_rate": 8.5 }` leaves everything else untouched.
+
+- **`routes/items.js` follows the same CRUD shape established by Clients (Stage 5) almost exactly** — list, create, partial update via a dynamic `SET` builder, delete — just against `catalog_items` instead of `clients`. Recognizing that repeated shape is useful: once you've built this pattern once, most single-table CRUD resources in the app are a copy-adapt job rather than something to design from scratch each time.
+
+- **The catalog exists purely to save typing on the invoice line-item builder** — nothing in this file talks to `invoices` or `invoice_items` directly. The connection is one-directional and manual: the frontend's "From Catalog" picker reads from `GET /api/items`, and picking one just pre-fills a line item's `description`/`rate` in the invoice form. There's no foreign key tying an invoice line item back to the catalog item it came from, which is intentional — editing a catalog item's rate later shouldn't retroactively change the amount on invoices you already sent.
+
+- **`rate` is normalized to a JS `Number` in every response** (`{ ...r, rate: Number(r.rate) }`) because Postgres's `NUMERIC` type is returned by `pg` as a string by default, to avoid floating-point precision loss. Casting it back to `Number` at the API boundary keeps the JSON response using an actual number type for the frontend, consistent with how `invoice.js` and the reports routes already handle every other money field.
+
+**Manual Verification (Postman)**
+- `PATCH http://localhost:8000/api/settings`
+  ```json
+    {
+        "company_name": "Chen Studio",
+        "address": "410 Townsend St, San Francisco, CA",
+        "currency": "USD",
+        "tax_rate": 8.5,
+        "invoice_prefix": "INV-"
+    }
+  ```
+    → `200 OK`
+  ```json
+    {
+        "settings": {
+            "user_id": "62ddc9a3-d9b9-4421-ab55-a44979571f89",
+            "company_name": "Chen Studio",
+            "logo_url": "",
+            "address": "410 Townsend St, San Francisco, CA",
+            "email": "jsmith@timetoprogram.com",
+            "phone": "",
+            "currency": "USD",
+            "tax_rate": "8.500",
+            "invoice_prefix": "INV-",
+            "next_seq": 4,
+            "accent_color": "",
+            "created_at": "2026-09-08T06:40:05.662Z",
+            "updated_at": "2026-09-30T01:42:44.831Z"
+        }
+    }
+  ```
+  Confirms only the five submitted fields changed — `email` still reflects the value set back in registration, and `next_seq` (already at 4 from prior invoice creation) was untouched by this update. Note `tax_rate` comes back as the string `"8.500"`, not a number — unlike `items.js`, `settings.js` doesn't currently cast `NUMERIC` fields to `Number` before responding, so the frontend will need to handle that itself (or a future pass could add the same normalization used for `rate`).
+  
+  ---
+- `POST http://localhost:8000/api/items`
+  ```json
+    { "name": "Frontend development", "rate": 95, "unit": "hour" }
+  ```
+    → `201 Created`
+  ```json
+    {
+        "item": {
+            "id": "82fe1e79-4ce4-48cc-828b-119314cb8177",
+            "user_id": "62ddc9a3-d9b9-4421-ab55-a44979571f89",
+            "name": "Frontend development",
+            "description": "",
+            "rate": 95,
+            "unit": "hour",
+            "created_at": "2026-09-30T01:49:49.487Z",
+            "updated_at": "2026-09-30T01:49:49.487Z"
+        }
+    }
+  ```
+    Confirms the omitted `description` field correctly defaulted to an empty string, and `rate` came back as an actual number (`95`, not `"95.00"`) — the `Number(item.rate)` cast doing its job.
