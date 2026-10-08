@@ -1,5 +1,28 @@
 # Invoicer — Changelog
 
+## v0.8.0 — Expenses & Payments APIs (auto-reconciling invoices)
+**Release Date:** October 8, 2026
+
+- Handles money going out and coming in: expenses on one side, and a payment ledger that closes the loop on invoices
+- Added `routes/expenses.js`, mounted at `/api/expenses`:
+  - `GET /` — lists expenses, optionally filtered by `category` and `month`, and returns overall and this-month spend totals plus a distinct category list for the filter dropdown
+  - `POST /` — creates an expense, defaulting the date to today, the category to "General", and the currency to USD when omitted
+  - `PATCH /:id` — partial update using the same "only rebuild SET clauses for fields actually sent" pattern as Clients and Items
+  - `DELETE /:id` — deletes an expense scoped to the authenticated user
+- Added `routes/payments.js`, mounted at `/api/payments`:
+  - `GET /` — lists payments joined with invoice number, invoice total, and client name, plus overall and this-month totals
+  - `POST /` — verifies the invoice belongs to the user, then records the payment and reconciles the invoice inside one transaction
+  - `DELETE /:id` — removes a payment and re-reconciles its invoice in the same transaction
+- Added `reconcileInvoice()`, which re-sums every payment against an invoice and keeps its status truthful. Payments that cover the total flip it to `paid` and stamp `paid_at`. If a removed payment leaves it underpaid, it quietly reverts to `sent` and clears `paid_at`
+- Wired both routers into `server.js`; every route is protected by `requireAuth` and scoped by `user_id`
+- Tested in Postman:
+  - `POST /api/expenses` logged an Adobe expense under "Software", with defaults applied for the omitted date, currency, and notes
+  - `POST /api/payments` with a partial payment (5480 against a 5945.80 invoice) correctly left the invoice as `sent`
+  - Multi-payment: a second payment covering the remaining balance flipped the invoice to `paid`
+  - Single full payment: one payment equal to the invoice total flipped it to `paid` immediately
+
+---
+
 ## v0.7.0 — Settings & Services Catalog APIs
 **Release Date:** September 30, 2026
 

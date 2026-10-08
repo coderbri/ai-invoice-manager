@@ -10,6 +10,7 @@
 - [Stage 6: Invoices API (line items, totals & status in a transaction)](#stage-6-invoices-api-line-items-totals--status-in-a-transaction)
 - [Stage 7: Dashboard & Reports APIs (SQL aggregations, aging report)](#stage-7-dashboard--reports-apis-sql-aggregations-aging-report)
 - [Stage 8: Settings & Services Catalog APIs](#stage-8-settings--services-catalog-apis)
+- [Stage 9: Expenses & Payments APIs (auto-reconciling invoices)](#stage-9-expenses--payments-apis-auto-reconciling-invoices)
 
 
 ## Stage 1: Backend Scaffold & Environment Setup
@@ -273,3 +274,84 @@ Why so much error-handling infrastructure this early, before a single "real" fea
     }
   ```
     Confirms the omitted `description` field correctly defaulted to an empty string, and `rate` came back as an actual number (`95`, not `"95.00"`) — the `Number(item.rate)` cast doing its job.
+
+---
+
+## Stage 9: Expenses & Payments APIs (auto-reconciling invoices)
+
+**Logic Flow**
+
+- **`routes/expenses.js` is the Stage 5/8 CRUD shape with one new idea: a dynamic filtered `GET`.** The handler builds its `WHERE` clause from two arrays that grow together: `where` holds the SQL fragments and `params` holds their values. Each optional filter (`category`, `month`) pushes its value onto `params` and then references it as `$${params.length}`, so the placeholder number always matches the value's position. With no filters, only `user_id = $1` is applied.
+- **The totals and category list deliberately ignore the filters.** The totals query and the `SELECT DISTINCT category` query run separately from the filtered list and only scope by `user_id`. The header cards ("total spend", "spent this month") and the category dropdown therefore stay stable while the user filters the table.
+- **`ser()` and `num()` normalize money at the API boundary.** Postgres `NUMERIC` comes back from `pg` as a string, so every response converts `amount` back to a real number, consistent with the other money fields in the app.
+- **`routes/payments.js` is built around `reconcileInvoice()`, the function that makes invoice status "tell the truth" automatically.** It receives a transaction `client` and an `invoiceId`, then:
+  1. Fetches the invoice `total` and re-sums every payment recorded against it in one query.
+  2. If `paid >= total` (and the total is above zero), it flips the invoice to `paid`. `COALESCE(paid_at, now())` stamps the timestamp once and preserves the original paid date if more payments arrive later.
+  3. Otherwise it reverts a `paid` invoice back to `sent` and clears `paid_at`. An invoice that was never paid is left alone.
+- **`POST /` runs in two phases.** The first phase is an ownership check: it looks up the invoice by `id` and `user_id` outside the transaction and 404s if it isn't the user's. This stops anyone from attaching payments to someone else's invoice by guessing a UUID. The second phase is the transaction, which inserts the payment and calls `reconcileInvoice` before committing. If either step throws, both roll back, so the payment ledger and the invoice status can never disagree.
+- **`DELETE /:id` mirrors the same pattern in reverse.** It looks up the payment's `invoice_id` first (scoped to the user), then deletes the payment and re-reconciles inside one transaction. Removing a payment that had fully covered an invoice automatically reverts it to `sent`.
+- **Invoice status is derived, not manually maintained.** Nothing in the payments flow trusts a client to say "this invoice is paid." The server computes it from the actual payment rows every time, so it's the same server-owns-the-money-math boundary established in Stage 6.
+
+**Manual Verification (Postman)**
+
+- `POST http://localhost:8000/api/expenses`
+```json
+  { "vendor": "Adobe", "category": "Software", "amount": 54.99 }
+```
+  → `201 Created`
+```json
+  {
+      "expense": {
+          "id": "84b2daba-e3f0-4ba6-be0d-52f5abe3d9a2",
+          "user_id": "62ddc9a3-d9b9-4421-ab55-a44979571f89",
+          "vendor": "Adobe",
+          "category": "Software",
+          "expense_date": "2026-10-08T04:00:00.000Z",
+          "amount": 54.99,
+          "currency": "USD",
+          "notes": "",
+          "created_at": "2026-10-08T03:36:36.643Z",
+          "updated_at": "2026-10-08T03:36:36.643Z"
+      }
+  }
+```
+  Confirms the omitted `expense_date`, `currency`, and `notes` fell back to their defaults, and `amount` came back as a number.
+
+- **Test 1: partial payment leaves the invoice as `sent`.** `POST http://localhost:8000/api/payments`
+```json
+  {
+      "invoiceId": "24318c62-a657-481d-ace7-2eaa4d055816",
+      "amount": 5480,
+      "method": "Bank transfer"
+  }
+```
+  → `201 Created` with the payment record. Then `GET /api/invoices` shows the invoice still `"sent"` with `paid_at: null`. The invoice total is `5945.8` (subtotal 5480 plus 465.80 tax), so 5480 doesn't cover it. The invoice's `updated_at` matched the payment's `created_at` to the millisecond, which shows the reconcile ran in the same transaction and correctly took the "not fully covered" branch.
+
+- **Test 2: multi-payment sum flips the invoice to `paid`.** Record the remaining balance against the same invoice:
+```json
+  {
+      "invoiceId": "24318c62-a657-481d-ace7-2eaa4d055816",
+      "amount": 465.8,
+      "method": "Bank transfer"
+  }
+```
+  `5480 + 465.80 = 5945.80`, which meets the total. `GET /api/invoices` shows the invoice as `"paid"` with a `paid_at` timestamp. This proves `reconcileInvoice` sums all payments rather than just checking the latest one.
+
+- **Test 3: single full payment.** Record the full invoice total on a separate unpaid invoice (swap in its `id`):
+```json
+  {
+      "invoiceId": "<unpaid-invoice-id>",
+      "amount": 5945.8,
+      "method": "Credit card"
+  }
+```
+  The invoice flips to `"paid"` in a single call.
+
+**Takeaways**
+
+- **When something "doesn't update," check the numbers before the code.** The first reconcile test left the invoice as `sent` because the payment was the invoice's subtotal (5480), not its total (5945.80). The tax is easy to forget. The matching `updated_at` and `created_at` timestamps were the clue that the reconcile ran and behaved correctly.
+- **The transaction here is what makes the feature trustworthy, not just convenient.** A payment row and an invoice status are two separate writes. Without `withTransaction`, a crash between them would leave money recorded against an invoice that still says `sent`, or the reverse. Wrapping both means they succeed or fail together.
+- **Compare with `>=`, and guard the zero case.** Using `paid >= total` handles overpayments naturally instead of requiring an exact match. The `total > 0` guard stops a zero-total invoice from being marked paid by any payment.
+- **Reconcile after deletes, not just inserts.** It's easy to build "payment recorded, invoice paid" and forget the reverse. Because `DELETE` also calls `reconcileInvoice`, the invoice status is always a function of the payment rows currently in the table, whatever order things happened in.
+- **A dynamic `WHERE` builder is the same idea as the dynamic `SET` builder.** Both push values onto a params array and reference them with `$${array.length}`, so placeholder numbers can never drift out of sync with their values. This keeps every value parameterized (no string-concatenated user input in SQL) even when the query shape changes.
+- **Do ownership checks before opening a transaction.** The invoice lookup fails fast with a clean 404 before any connection is checked out for writes, so rejected requests never touch the transaction path.
