@@ -1,5 +1,30 @@
 # Invoicer — Changelog
 
+## v0.9.0 — AI Features with Google Gemini (Receipt Scan, Summary, Reminders, Notes)
+**Release Date:** October 8, 2026
+
+- Added `middleware/upload.js` for receipt uploads:
+  - Multer with in-memory storage, so files never touch disk and the bytes go straight to Gemini
+  - 10MB size cap, one file per request, and an allow-list of PDF and common image types (PNG, JPEG, WEBP, HEIC/HEIF)
+  - `uploadReceipt()` wrapper that turns Multer errors (too large, wrong type, missing file) into clean `ApiError` responses
+- Added `services/geminiService.js`, which holds all the AI logic behind four feature functions:
+  - `parseReceipt` sends a receipt image or PDF to Gemini's vision model with a strict JSON response schema at a low temperature, then validates the result with Zod so it can drop straight into an invoice or expense
+  - `businessSummary` turns this month's numbers into a short plain-English read with one actionable suggestion
+  - `paymentReminder` writes a reminder email in a friendly, firm, or final-notice tone and splits the result into subject and body
+  - `writeNote` drafts a service description or payment-terms note
+  - Shared `generate()` helper so all four features use one call path, plus a `requireAi()` guard that fails with a clear error when `GEMINI_API_KEY` is missing instead of crashing the server at startup
+- Added `routes/ai.js`, mounted at `/api/ai`, as thin plumbing over the service:
+  - `POST /receipt-parse` accepts a file upload and returns the structured receipt data
+  - `POST /business-summary` gathers revenue (this month vs. last), outstanding, overdue count and total, and the top three overdue invoices from the database first, then has Gemini summarize those facts
+  - `POST /payment-reminder` loads the invoice with its client, pulls the company profile for the signature, calculates days overdue, and returns the draft with the client's email address
+  - `POST /write-note` validates the request and returns a drafted note
+- Protected every AI route with `requireAuth` and the per-user `aiLimiter`, so a runaway loop can't quietly run up a Gemini bill
+- Wired the router into `server.js` at `/api/ai`
+- Tested in Postman: `POST /api/ai/receipt-parse` with a PNG receipt returned the vendor, date, line items, subtotal, and total, and `POST /api/ai/write-note` returned a polished payment-terms note
+- Updated `middleware/rateLimit.js` (from v0.2.0) to pass `req.ip` to `ipKeyGenerator` instead of `(req, res)`, so IP-based rate limiting keys correctly for both the AI and auth limiters
+
+---
+
 ## v0.8.0 — Expenses & Payments APIs (auto-reconciling invoices)
 **Release Date:** October 8, 2026
 

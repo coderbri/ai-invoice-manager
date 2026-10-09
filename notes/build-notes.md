@@ -11,6 +11,7 @@
 - [Stage 7: Dashboard & Reports APIs (SQL aggregations, aging report)](#stage-7-dashboard--reports-apis-sql-aggregations-aging-report)
 - [Stage 8: Settings & Services Catalog APIs](#stage-8-settings--services-catalog-apis)
 - [Stage 9: Expenses & Payments APIs (auto-reconciling invoices)](#stage-9-expenses--payments-apis-auto-reconciling-invoices)
+- [Stage 10: AI Features with Google Gemini](#stage-10-ai-features-with-google-gemini)
 
 
 ## Stage 1: Backend Scaffold & Environment Setup
@@ -355,3 +356,56 @@ Why so much error-handling infrastructure this early, before a single "real" fea
 - **Reconcile after deletes, not just inserts.** It's easy to build "payment recorded, invoice paid" and forget the reverse. Because `DELETE` also calls `reconcileInvoice`, the invoice status is always a function of the payment rows currently in the table, whatever order things happened in.
 - **A dynamic `WHERE` builder is the same idea as the dynamic `SET` builder.** Both push values onto a params array and reference them with `$${array.length}`, so placeholder numbers can never drift out of sync with their values. This keeps every value parameterized (no string-concatenated user input in SQL) even when the query shape changes.
 - **Do ownership checks before opening a transaction.** The invoice lookup fails fast with a clean 404 before any connection is checked out for writes, so rejected requests never touch the transaction path.
+
+---
+
+## Stage 10: AI Features with Google Gemini
+
+**Logic Flow**
+
+- **The upload layer comes first.** `middleware/upload.js` configures Multer with `memoryStorage()`, so the file lives in a buffer on `req.file` instead of being written to disk. That means there's no temp file to clean up, and the bytes can go straight to Gemini. Limits (10MB, one file) and a MIME allow-list are enforced before the handler ever runs. The `uploadReceipt()` wrapper exists because Multer reports problems through its own error types. The wrapper catches those, translates them into `ApiError.badRequest` messages ("File exceeds 10MB limit", "Upload a PDF or image"), and also rejects requests with no file at all.
+
+- **The service layer holds all the AI logic.** `services/geminiService.js` builds the Gemini client only if `GEMINI_API_KEY` exists. Every feature starts with `requireAi()`, so a missing key returns a clear 500 on the AI routes instead of crashing the whole server at boot. All four features go through one `generate()` helper, which calls the model named in `GEMINI_MODEL`, returns the text, and throws if the response is empty.
+
+- **Feature 1, receipt parsing, uses structured output.** The request has three parts: a prompt, the file as base64 `inlineData`, and a `responseSchema` describing the exact JSON shape wanted (vendor, date, currency, subtotal, tax, total, category, notes, and an array of line items with description, quantity, and rate). With `responseMimeType: "application/json"` and a temperature of 0.1, Gemini returns data instead of prose. The reply then passes through a Zod validator whose defaults fill any missing field, so downstream code never sees `undefined`. Parse failures are caught and rethrown as a clear server error rather than leaking a raw `SyntaxError`. The `image/jpg` alias is also normalized to `image/jpeg` before sending.
+
+- **Feature 2, business summary, is grounded in database facts.** The route runs the queries first: a single aggregate for revenue this month, revenue last month, outstanding, overdue count, and overdue total, plus a second query for the top three overdue invoices with client names. It shapes those into a small `data` object and only then asks Gemini to summarize it. The prompt asks for 2-3 sentences, a percentage trend if computable, and one actionable suggestion. The response returns both the `summary` and the `data` it was based on, which makes the output easy to check.
+
+- **Feature 3, payment reminders, shifts tone and splits the result.** The route loads the invoice joined to its client, scoped by `user_id` so you can't draft reminders for someone else's invoice. It gets the company profile through `Settings.ensure()` for the signature, falling back to the user's name if no company name is set. Days overdue is `(now − due_date) / 86,400,000 ms`, floored and never below zero, with zero for invoices that have no due date. The `tone` value (`friendly`, `firm`, or `final`) selects a tone guide in the prompt. The service asks for "a subject line, then a blank line, then the body" and splits the text at the first newline into `{ subject, body }`, stripping a leading "Subject:" if the model adds one. The route returns `meta.to` with the client's email so the UI knows where the draft goes.
+
+- **Feature 4, write note, is a pass-through.** The route validates `kind` (`description` or `terms`), an optional prompt capped at 600 characters, and optional line items and client context. The service builds a prompt from whichever pieces were supplied, with `.filter(Boolean)` dropping the empty ones, and returns plain text.
+
+- **The route file is plumbing.** `routes/ai.js` applies `requireAuth` to the whole router, then each endpoint chains `aiLimiter` first. On `/receipt-parse`, the limiter runs before `uploadReceipt`, so a rate-limited request is rejected before any file gets parsed into memory. Finally, `server.js` mounts the router at `/api/ai`.
+
+**Manual Verification (Postman)**
+
+No automated tests this session. The endpoints are exercised by hand, and the seed script in the next stage will supply realistic data to exercise the summary and reminder routes.
+
+- `POST http://localhost:8000/api/ai/receipt-parse`
+  - Body → form-data, with a key named `file` set to type **File** and a PNG of a receipt attached
+  - Expected: the vendor, date, every line item with its quantity and price, the subtotal, and the total, returned as `{ "result": { ... } }`
+
+- `POST http://localhost:8000/api/ai/write-note`
+```json
+  {
+      "kind": "terms",
+      "prompt": "net 15, friendly"
+  }
+```
+  → `200 OK`
+```json
+  { "text": "We appreciate your business! Payment is due within 15 days of the invoice date." }
+```
+  Confirms the full route → validation → service → Gemini → trimmed text path works end to end.
+
+**Takeaways**
+
+- **Don't ask the model to guess. Give it facts.** The business summary works because the database does the arithmetic (revenue, overdue totals, top offenders) and Gemini only turns a small, accurate JSON object into readable language. That's far more reliable than handing a model raw rows and hoping it adds them up correctly.
+- **Structured output turns an AI call into a normal function call.** Passing a `responseSchema` means Gemini returns JSON in a known shape instead of free text you'd have to scrape. Validating it with Zod afterward is a second safety net: the schema steers the model, and Zod guarantees what your code receives.
+- **Treat model output as untrusted input.** Even with a schema, a response can be malformed or incomplete. Catching parse and validation failures and returning one clear server error is better than letting a raw `SyntaxError` or a misleading 400 "Validation failed" reach the client, who sent a perfectly good request.
+- **Temperature should match the task.** Receipt extraction runs at 0.1 because there is one right answer and you want repeatability. Summaries sit at 0.5, reminders at 0.6, and notes at 0.7, where some variety in wording is welcome.
+- **Memory storage is the right fit here and has a limit.** Keeping the upload in a buffer avoids disk cleanup and gives Gemini the bytes directly. The trade-off is that each in-flight upload holds up to 10MB in RAM, which is why the size cap and single-file limit matter.
+- **Order middleware by cost.** The rate limiter runs before the upload parser, and authentication runs before both. The cheapest checks reject bad requests first, before any file is buffered or any paid API call is made.
+- **Keep routes thin and services deep.** The routes only gather inputs and shape outputs. Prompts, schemas, and model settings live in one service file, so swapping models, tuning a prompt, or replacing Gemini later touches one place.
+- **Make a missing key fail softly.** Building the client conditionally and checking it per request means the rest of the app keeps working in an environment without an API key, and the AI routes explain exactly what's missing.
+- **Third-party helper signatures can change between major versions, so check the README when upgrading.** `ipKeyGenerator` in express-rate-limit v8 takes the IP string, not the request and response objects. The old call shape can fail silently, and a limiter that never trips looks identical to one that works until someone actually hammers the endpoint. A quick test is to send 31 bad logins in a row and confirm the 31st returns a 429.
