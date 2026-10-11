@@ -12,6 +12,7 @@
 - [Stage 8: Settings & Services Catalog APIs](#stage-8-settings--services-catalog-apis)
 - [Stage 9: Expenses & Payments APIs (auto-reconciling invoices)](#stage-9-expenses--payments-apis-auto-reconciling-invoices)
 - [Stage 10: AI Features with Google Gemini](#stage-10-ai-features-with-google-gemini)
+- [Stage 11: Seeding Demo Data & Connecting the Frontend](#stage-11-seeding-demo-data--connecting-the-frontend)
 
 
 ## Stage 1: Backend Scaffold & Environment Setup
@@ -409,3 +410,58 @@ No automated tests this session. The endpoints are exercised by hand, and the se
 - **Keep routes thin and services deep.** The routes only gather inputs and shape outputs. Prompts, schemas, and model settings live in one service file, so swapping models, tuning a prompt, or replacing Gemini later touches one place.
 - **Make a missing key fail softly.** Building the client conditionally and checking it per request means the rest of the app keeps working in an environment without an API key, and the AI routes explain exactly what's missing.
 - **Third-party helper signatures can change between major versions, so check the README when upgrading.** `ipKeyGenerator` in express-rate-limit v8 takes the IP string, not the request and response objects. The old call shape can fail silently, and a limiter that never trips looks identical to one that works until someone actually hammers the endpoint. A quick test is to send 31 bad logins in a row and confirm the 31st returns a 429.
+
+---
+
+## Stage 11: Seeding Demo Data & Connecting the Frontend
+
+**Key Commands**
+```bash
+# Apply the schema without starting the server
+npm run migrate
+
+# Wipe and regenerate the demo account's data (safe to rerun)
+npm run seed
+```
+
+**Logic Flow**
+
+- **`migrate.js` is a one-shot schema runner.** It imports the shared pool and `SCHEMA_SQL`, runs it, logs the result, and closes the pool in `finally`. Since the schema uses `CREATE TABLE IF NOT EXISTS`, running it repeatedly is harmless.
+
+- **`seed.js` follows a fixed order: user, settings, wipe, clients, catalog, invoices, expenses.** It looks the demo user up by email. If they exist, it resets the password instead of creating a duplicate. Otherwise it creates them. It then sets the company profile through `Settings.update()`. Next it deletes that user's old payments, expenses, catalog items, invoices, and clients, children before parents, so reruns start clean.
+
+- **Invoice generation reuses the real money math.** For each of the 84 invoices, the script picks a random issue date within the last 330 days, a due date 15 to 45 days later, one to four line items from the catalog (hourly items get a realistic quantity), and an optional tax rate and discount. It passes all of that through `computeTotals()`, the same function the invoices API uses, so seeded totals can't drift from real ones.
+
+- **Paid invoices get a consistent paid date and payment.** A `paid_at` date falls between the issue date and up to 35 days later, never in the future. The script then inserts a payment for the full invoice total on that date, so the invoice status and the payment ledger agree, as `reconcileInvoice()` would produce.
+
+- **The scattered dates are what make the analytics look real.** Because invoices span nearly a year with mixed statuses and due dates, the revenue series fills in across months, the aging report spreads across its buckets, and top clients rank differently. A near-empty database would show zeros everywhere.
+
+- **What the mock layer was.** Until this stage, the whole frontend ran on local fake data. `mock/store.js` generated a small in-memory dataset at load (12 clients, 30 invoices, 20 expenses) with a seeded random number generator so it looked the same on every refresh. `mock/api.js` mimicked every backend endpoint against that store, with a short artificial delay so loading states showed. It reimplemented the invoice reconciliation logic, returned canned AI responses, and rejected `me()` with a 401 so the app started on the login screen. Nothing persisted past a page refresh.
+
+- **What the axios calls replaced.** Each `api/*.js` file had two blocks: the real axios calls commented out and the mock calls live. Switching them over replaced `mock.clients.list()` with `apiClient.get("/clients")`, and the same for every other endpoint. The mock handlers were written to return already-unwrapped data, so each real call ends in `.then((r) => r.data.clients)` (or `.client`, `.invoice`, and so on) to peel off the backend's response envelope and hand the pages the same shape as before. Endpoints that return more than one thing (`dashboard`, `reports`, `payments`, and `expenses` lists) return `r.data` whole. That's why no page or hook needed to change.
+
+- **`client.js` is where the cookie auth and error handling meet.** `withCredentials: true` makes the browser send the HTTP-only session cookie from Stage 4 with every request, which is what lets `requireAuth` identify the user. The response interceptor reads `err.response.data.error.message`, the exact shape produced by the backend's `errorHandler` in Stage 3, and rejects with `{ status, message, details }`. This is why one error format everywhere paid off.
+
+- **The seeded data now lives in Neon instead of memory.** The same fields the mock store invented (invoice numbers, statuses, due dates, payments, expense categories) now come from real rows, so the dashboard, reports, and aging charts show query results rather than arrays computed in the browser.
+
+**Manual Verification**
+
+- `npm run migrate` → `✅ Schema applied.`
+- `npm run seed` →
+  - User ready: alex@timetoprogram.com (existing)
+  - Created 28 clients
+  - Created 14 catalog items
+  - Created 84 invoices (50 paid + payments)
+  - Created 49 expenses
+  - ✅ Seed complete.
+
+- Confirmed in the Neon dashboard that the seeded rows appeared in the tables.
+
+**Takeaways**
+
+- **A seed script is a test fixture for your whole stack.** Realistic volume and spread are what expose problems that an almost-empty database hides, like how aging buckets, monthly series, and top-client rankings behave with real distributions.
+- **Make seeds idempotent.** Looking the user up before creating, and wiping only that user's rows before regenerating, means one command always produces the same kind of clean state without duplicates or leftovers from earlier runs.
+- **Reuse production logic in seeds.** Calling `computeTotals()` instead of hand-writing totals means a seeded invoice can't contradict what the app would calculate itself.
+- **Consistent response envelopes are what made the switch painless.** Every endpoint wraps its payload in a predictable key, and every error uses the same `{ error: { message, details } }` shape. A mock designed to mirror those shapes could be swapped for the real API without touching a single page.
+- **Cookies need `withCredentials` on the client and an explicit origin allow-list on the server.** Both halves have to be configured for a cross-origin session to work. If login succeeds but every later request returns 401, check this pair first.
+- **Mock layers are scaffolding.** They let the UI be built and demoed without a backend, and once the real API matches their contract, they should be deleted so two sources of truth don't linger.

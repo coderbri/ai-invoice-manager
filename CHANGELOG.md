@@ -1,5 +1,22 @@
 # Invoicer — Changelog
 
+## v0.10.0 — Seeding Demo Data & Connecting the Frontend
+**Release Date:** October 11, 2026
+
+- Added `scripts/migrate.js` (`npm run migrate`) to apply the database schema without starting the server
+- Added `scripts/seed.js` (`npm run seed`) to populate a demo account with realistic data:
+	- 28 clients, 14 catalog items, 84 invoices spread over about 11 months, and 49 expenses across software, hosting, meals, travel, office, equipment, and marketing
+	- Invoices get a realistic mix of statuses (roughly 60% paid, 25% sent, 15% draft), randomized line items, tax, and discounts, with totals computed by the same `computeTotals` used for real invoices
+	- Every paid invoice gets a matching payment record, so the ledger agrees with invoice status
+	- The invoice counter (`next_seq`) is moved past the seeded numbers so new invoices don't collide
+	- Safe to rerun: it resets only the demo account's data and password, leaving other users untouched
+- Ran both scripts against Neon: the schema applied cleanly, and the seed created 28 clients, 14 catalog items, 84 invoices (50 paid, each with a payment), and 49 expenses
+- Connected the frontend to the real backend by switching every `frontend/src/api/*.js` file from its mock block to its real axios block:
+	- `client.js`: enabled the axios client with `baseURL: "/api"` and `withCredentials: true`, so the HTTP-only session cookie travels with every request, plus a response interceptor that turns backend errors into a consistent `{ status, message, details }` shape
+	- `auth.js`, `clients.js`, `invoices.js`, `dashboard.js`, `settings.js`, `ai.js`, and `features.js` (items, expenses, payments, reports) now call the live endpoints
+	- `receiptParse` uploads the file as multipart form-data to `/api/ai/receipt-parse`
+- Retired the mock layer (`frontend/src/mock/api.js` and `store.js`), which is removed at commit
+
 ## v0.9.0 — AI Features with Google Gemini (Receipt Scan, Summary, Reminders, Notes)
 **Release Date:** October 8, 2026
 
