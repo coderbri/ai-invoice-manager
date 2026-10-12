@@ -1,5 +1,15 @@
 # Invoicer — Changelog
 
+## v0.10.1 — Fix: Update Gemini Model to gemini-3.8-flash
+**Release Date:** October 12, 2026
+
+- Fixed all four AI features (receipt scan, business summary, payment reminder, write note) failing with a 404: Google retired `gemini-2.5-flash` for new API users, so every Gemini call was rejected and surfaced to the app as a 500 error
+- Updated the model to `gemini-3.8-flash` in `.env`, `.env.example`, and the fallback in `config/env.js`, so a missing `GEMINI_MODEL` no longer defaults to the retired model
+- No service code changes were needed: `generateContent` is still fully supported, and the model name is read from config
+- Verified in the app: generating an AI payment reminder now returns a drafted email
+
+---
+
 ## v0.10.0 — Seeding Demo Data & Connecting the Frontend
 **Release Date:** October 11, 2026
 
