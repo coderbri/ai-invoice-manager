@@ -1,5 +1,20 @@
 # Invoicer — Changelog
 
+## v0.10.2 — Resilient AI Calls: Retries for Gemini Outages & Friendly Errors
+**Release Date:** October 12, 2026
+
+- Fixed AI features failing outright when Gemini is briefly overloaded: a `503 UNAVAILABLE` ("high demand") response from Google previously surfaced as a 500 error with the raw Google JSON as the message
+- Updated the shared `generate()` helper in `services/geminiService.js` so every AI feature (receipt scan, business summary, payment reminder, write note) gets the same resilience:
+	- Temporary outages (503 and 504) are retried up to three attempts with exponential backoff, waiting 1 second and then 2 seconds between tries
+	- If the service is still unavailable after the retries, the user gets a clear message ("The AI service is busy right now. Please try again in a moment.") instead of Google's raw error
+	- Rate-limit responses (429) are mapped to a friendly "AI usage limit reached" message through `ApiError.tooMany`
+	- Every other error is rethrown unchanged, so permanent failures like a retired model or a bad API key still surface immediately and aren't retried
+- Verified in the app: the AI business summary, which had just hit a 503, now generates successfully
+- Docs: moved the Invoicer feature reference and build notes from the `notes/` directory (now deleted) into `docs/`, to prep the project documentation structure
+  - `build-notes.md` is renamed as `NOTES.md`
+
+---
+
 ## v0.10.1 — Fix: Update Gemini Model to gemini-3.8-flash
 **Release Date:** October 12, 2026
 

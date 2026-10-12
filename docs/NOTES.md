@@ -13,6 +13,7 @@
 - [Stage 9: Expenses & Payments APIs (auto-reconciling invoices)](#stage-9-expenses--payments-apis-auto-reconciling-invoices)
 - [Stage 10: AI Features with Google Gemini](#stage-10-ai-features-with-google-gemini)
 - [Stage 11: Seeding Demo Data & Connecting the Frontend](#stage-11-seeding-demo-data--connecting-the-frontend)
+- [Stage 12: Resilient AI Calls (retries & graceful errors)](#stage-12-resilient-ai-calls-retries--graceful-errors)
 
 
 ## Stage 1: Backend Scaffold & Environment Setup
@@ -465,3 +466,36 @@ npm run seed
 - **Consistent response envelopes are what made the switch painless.** Every endpoint wraps its payload in a predictable key, and every error uses the same `{ error: { message, details } }` shape. A mock designed to mirror those shapes could be swapped for the real API without touching a single page.
 - **Cookies need `withCredentials` on the client and an explicit origin allow-list on the server.** Both halves have to be configured for a cross-origin session to work. If login succeeds but every later request returns 401, check this pair first.
 - **Mock layers are scaffolding.** They let the UI be built and demoed without a backend, and once the real API matches their contract, they should be deleted so two sources of truth don't linger.
+
+---
+
+## Stage 12: Resilient AI Calls (retries & graceful errors)
+
+**Logic Flow**
+
+- **All the changes live in one function.** Every AI feature goes through `generate()` in `services/geminiService.js`, which makes it the one place to add resilience. A single edit covers receipt scanning, summaries, reminders, and notes without touching any route.
+- **The call is wrapped in a bounded retry loop.** `generate()` loops up to `MAX_ATTEMPTS` (3) times. Each pass tries the Gemini call and returns the text on success. An empty response throws inside the `try`, lands in the `catch`, and is rethrown because it has no retryable status, so it is not retried.
+- **The `catch` block makes one decision per error:**
+  1. **Retryable status (503 or 504) with attempts left:** wait `1000 * 2 ** (attempt - 1)` milliseconds (1 second, then 2) and `continue` to the next attempt.
+  2. **Retryable status on the final attempt:** stop retrying and throw a friendly `ApiError(503, "The AI service is busy right now...")`.
+  3. **A 429 (rate limit):** throw `ApiError.tooMany(...)` right away, without retrying.
+  4. **Anything else:** `throw err` unchanged, so real bugs still surface.
+- **Why only 503 and 504 are retried.** Those mean "the server is busy or timed out," which usually clears in seconds. A 404 (retired model), 400 (bad request), or 401 (bad key) fails the same way every time, so retrying only wastes time. A 429 is a quota problem, and an immediate retry would likely hit the same limit.
+- **Why the wait doubles.** Exponential backoff gives an overloaded server room to recover. Retrying instantly would add to the very load causing the failure.
+- **The friendly messages travel through the existing error pipeline.** Because they are `ApiError` instances, the centralized error handler from Stage 3 returns them with the right status and the standard `{ error: { message } }` shape, and the frontend's axios interceptor already knows how to read that.
+
+**Manual Verification**
+
+- Hit `POST /api/ai/business-summary` during a Gemini overload. It returned `503 UNAVAILABLE` ("This model is currently experiencing high demand") and surfaced as a 500 with Google's raw JSON in the response.
+- Applied the new `generate()`. The business summary then generated successfully through the UI.
+- Earlier, the same endpoint family hit a permanent `404` when Google retired `gemini-2.5-flash` for new users. Switching `GEMINI_MODEL` to `gemini-3.8-flash` fixed that, and the AI payment reminder worked afterward.
+
+**Takeaways**
+
+- **Treat a hosted AI service as unreliable by design.** Models get overloaded and retired. A production app needs a plan for both: retries and friendly messages for temporary failures, and configuration (not hard-coded names) for things that change over time.
+- **A 404 and a 503 look alike in the UI but mean opposite things.** The retired-model 404 was permanent and needed a config change. The overloaded-model 503 was temporary and needed patience or a retry. Reading the status code tells you which fix to reach for.
+- **Keep the model name in config.** Because `GEMINI_MODEL` lives in `.env`, a retired model was a one-line fix (plus the fallback in `config/env.js`) with no change to the service logic. Keep `.env.example` and the code's fallback in sync, since they can quietly drift apart.
+- **Never show a third-party error to users.** The SDK puts Google's raw JSON in the error message, so without translation the user reads someone else's internals. Map outside errors to your own `ApiError` messages at the boundary.
+- **Put cross-cutting behavior at the narrowest shared point.** Retry logic in each of four feature functions would be four places to maintain. Putting it in `generate()` means one edit, one test, and consistent behavior everywhere.
+- **Retries trade time for reliability.** A failed call can now take a few seconds longer before the user sees the friendly error. That's the right trade here, but keep the attempt count small so the UI never feels frozen.
+- **Retry paths are hard to test on demand.** You can't make Google return a 503 whenever you like. Verify the happy path in the app, and keep the logic simple enough to reason about by reading it.

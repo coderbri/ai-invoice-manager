@@ -25,20 +25,52 @@ function requireAi() {
         throw ApiError.internal("GEMINI_API_KEY is not configured on the server.");
     }
 }
+/**
+ * Lists the HTTP statuses that signal a temporary Gemini outage worth retrying.
+ */
+const RETRYABLE_STATUSES = new Set([503, 504]);
+
+/**
+ * Sets how many times a single Gemini call is attempted before giving up.
+ */
+const MAX_ATTEMPTS = 3;
+
+/**
+ * Pauses for the given number of milliseconds, used between retries.
+ */
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Wraps a single call to the model so all four features share one clean path.
- * It returns the response text and throws if Gemini comes back empty.
+ * Temporary outages (503 and 504) are retried with exponential backoff, waiting 1s and then 2s.
+ * If the service is still unavailable, or the usage limit is hit, the raw Google error is replaced with a friendly message.
+ * Any other error is rethrown unchanged, and an empty response still throws.
  */
 async function generate({ contents, config }) {
-    const result = await ai.models.generateContent({
-        model: env.geminiModel,
-        contents,
-        config,
-    });
-    const text = typeof result.text === "function" ? result.text() : result.text;
-    if (!text) throw new Error("Empty response from Gemini");
-    return text;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        try {
+            const result = await ai.models.generateContent({
+                model: env.geminiModel,
+                contents,
+                config,
+            });
+            const text = typeof result.text === "function" ? result.text() : result.text;
+            if (!text) throw new Error("Empty response from Gemini");
+            return text;
+        } catch (err) {
+            if (RETRYABLE_STATUSES.has(err.status) && attempt < MAX_ATTEMPTS) {
+                await sleep(1000 * 2 ** (attempt - 1));
+                continue;
+            }
+            if (RETRYABLE_STATUSES.has(err.status)) {
+                throw new ApiError(503, "The AI service is busy right now. Please try again in a moment.");
+            }
+            if (err.status === 429) {
+                throw ApiError.tooMany("AI usage limit reached. Please wait a moment and try again.");
+            }
+            throw err;
+        }
+    }
 }
 
 /**
