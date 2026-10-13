@@ -1,5 +1,20 @@
 # Invoicer — Changelog
 
+## v0.11.0 — Project Documentation, Showcase README & License
+**Release Date:** October 13, 2026
+
+- Replaced the `notes/` directory with `docs/` as the home for project documentation, now containing:
+  - `DOCUMENTATION.md`: the full-length README, with the complete feature list, setup guide, environment variables, API reference, database schema, security and reliability details, project structure, and screenshot gallery
+  - The build notes, with commands, logic breakdowns, and lessons learned from each stage
+  - `invoicer-feature-reference.md`: the original feature and AI integration reference the backend was planned from
+  - `screenshots/`: images and recordings of the app
+- Rewrote `README.md` as a brief project showcase: the pitch and landing-page hero, my contribution (the backend built from scratch), the four AI features, engineering highlights, tech stack, screenshots, a quick start with demo login, and links to the deeper docs
+- Demoed the full application and captured screenshots: landing page, dashboard (light and dark), invoice builder, receipt-scan recording, AI payment reminder, reports, the seeded Neon database, and the seed script output
+- Added tutorial credit to the acknowledgments
+- Added an MIT `LICENSE`
+
+---
+
 ## v0.10.2 — Resilient AI Calls: Retries for Gemini Outages & Friendly Errors
 **Release Date:** October 12, 2026
 
